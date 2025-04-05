@@ -1,5 +1,4 @@
 import os
-import re
 import ffmpeg
 import uuid
 
@@ -38,16 +37,16 @@ celery.conf.update(
     }
 )
 
+
 @celery.task(name="tasks.process_message", queue=app.config["RMQ_QUEUE_READ"])
 def process_message(message):
     clip: Clip = ProtobufConverter.json_to_protobuf(message)
-    
+
     try:
         id = clip.id
         type = os.path.splitext(clip.originalVideo.name)[1]
 
         keyAss = f"{clip.userId}/{clip.id}/{id}.ass"
-        keyVideo = f"{clip.userId}/{clip.id}/{id}{type}"
         keyVideoProcessed = f"{clip.userId}/{clip.id}/{id}_processed{type}"
 
         tmpVideoFilePath = f"/tmp/{id}{type}"
@@ -57,9 +56,7 @@ def process_message(message):
         if not s3_client.download_file(keyAss, tmpAssFilePath):
             raise Exception
 
-        print(keyVideo)
-
-        if not s3_client.download_file(keyVideo, tmpVideoFilePath):
+        if not s3_client.download_file(keyVideoProcessed, tmpVideoFilePath):
             raise Exception
 
         ffmpeg.input(tmpVideoFilePath).output(
@@ -77,47 +74,19 @@ def process_message(message):
         file_client.delete_file(tmpProcessedVideoFilePath)
         file_client.delete_file(tmpVideoFilePath)
 
-        clip.status = ClipStatus.Name(
-            ClipStatus.SUBTITLE_INCRUSTATOR_COMPLETE
-        )
-
-        processed_video = create_processed_video(clip.originalVideo, f"{id}_processed{type}")
-        clip.processedVideo.CopyFrom(processed_video)
+        clip.status = ClipStatus.Name(ClipStatus.SUBTITLE_INCRUSTATOR_COMPLETE)
 
         protobuf = SubtitleIncrustatorMessage()
         protobuf.clip.CopyFrom(clip)
 
         rmq_client.send_message(protobuf, "App\\Protobuf\\SubtitleIncrustatorMessage")
     except Exception:
-        clip.status = ClipStatus.Name(
-            ClipStatus.SUBTITLE_INCRUSTATOR_ERROR
-        )
+        clip.status = ClipStatus.Name(ClipStatus.SUBTITLE_INCRUSTATOR_ERROR)
 
         protobuf = SubtitleIncrustatorMessage()
         protobuf.clip.CopyFrom(clip)
 
-        if not rmq_client.send_message(protobuf, "App\\Protobuf\\SubtitleIncrustatorMessage"):
+        if not rmq_client.send_message(
+            protobuf, "App\\Protobuf\\SubtitleIncrustatorMessage"
+        ):
             return False
-
-def create_processed_video(video: Video, name: str) -> Video:
-    processed_video = Video()
-    processed_video.id = str(uuid.uuid4())
-    processed_video.name = name
-    processed_video.mimeType = video.mimeType
-    processed_video.size = video.size
-
-    if video.originalName:
-        processed_video.originalName = video.originalName
-
-    if video.length:
-        processed_video.length = video.length
-
-    if video.ass:
-        processed_video.ass = video.ass
-
-    if video.subtitle:
-        processed_video.subtitle = video.subtitle
-
-    processed_video.IsInitialized()
-
-    return processed_video
